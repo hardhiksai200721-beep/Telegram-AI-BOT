@@ -29,7 +29,7 @@ client = OpenAI(
 SYSTEM_PROMPT = """
 You are a helpful AI assistant responding through Telegram.
 
-Your answers must be clean, readable, professional, and optimized
+Your answers must be clean, readable, accurate, and optimized
 specifically for Telegram.
 
 FORMATTING:
@@ -50,19 +50,8 @@ CODE:
 - Put programming code inside triple-backtick code blocks.
 - Mention the programming language when appropriate.
 - Explain code separately from the code block.
-- If the user asks to debug code, explain the problem and provide
-  corrected code when possible.
-
-TECHNICAL QUESTIONS:
-
-- Give a short explanation first.
-- Then explain important concepts using sections or bullet points.
-- Include simple examples when useful.
-
-SIMPLE QUESTIONS:
-
-- Give concise answers.
-- Do not create unnecessary sections.
+- If asked to debug code, identify the problem and provide corrected
+  code when possible.
 
 IMAGE ANALYSIS:
 
@@ -75,12 +64,12 @@ IMAGE ANALYSIS:
 
 DOCUMENT ANALYSIS:
 
-- Carefully analyze the supplied document or file.
-- Follow the user's instruction or caption.
-- If no specific instruction is provided, summarize and explain
-  the important contents.
+- Analyze only the document supplied in the current request.
+- Never describe a previously supplied document.
+- Follow the user's current caption or instruction.
+- If no instruction is provided, summarize the important contents.
 - For source-code files, explain the code and identify errors when useful.
-- Do not invent content that is not present in the file.
+- Do not invent content that is not present in the current file.
 
 ACCURACY:
 
@@ -91,18 +80,41 @@ ACCURACY:
 
 
 # =========================================================
-# TELEGRAM - SEND MESSAGE
+# TELEGRAM REQUEST HELPER
+# =========================================================
+
+def telegram_request(method, payload=None):
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
+
+    if payload is None:
+        request = urllib.request.Request(url)
+
+    else:
+        data = json.dumps(payload).encode("utf-8")
+
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"}
+        )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+# =========================================================
+# SEND TELEGRAM MESSAGE
 # =========================================================
 
 def send_telegram_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    # Telegram has a message-size limit.
-    # Split very long responses into smaller messages.
-    max_length = 4000
 
     if not text:
         text = "I couldn't generate a response."
+
+    # Telegram's message limit is 4096 characters.
+    # 3900 gives us some safety margin.
+    max_length = 3900
 
     chunks = [
         text[i:i + max_length]
@@ -111,92 +123,56 @@ def send_telegram_message(chat_id, text):
 
     for chunk in chunks:
 
-        # First try Markdown
-        data = json.dumps({
-            "chat_id": chat_id,
-            "text": chunk,
-            "parse_mode": "Markdown"
-        }).encode("utf-8")
-
-        request = urllib.request.Request(
-            url,
-            data=data,
-            headers={
-                "Content-Type": "application/json"
-            }
-        )
-
         try:
-            with urllib.request.urlopen(request) as response:
-                response.read()
-
-        except Exception:
-
-            # If Markdown parsing fails, send plain text
-            fallback_data = json.dumps({
-                "chat_id": chat_id,
-                "text": chunk
-            }).encode("utf-8")
-
-            fallback_request = urllib.request.Request(
-                url,
-                data=fallback_data,
-                headers={
-                    "Content-Type": "application/json"
+            telegram_request(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": chunk,
+                    "parse_mode": "Markdown"
                 }
             )
 
-            with urllib.request.urlopen(fallback_request) as response:
-                response.read()
+        except Exception:
+
+            # Markdown can fail if the model produces malformed markup.
+            telegram_request(
+                "sendMessage",
+                {
+                    "chat_id": chat_id,
+                    "text": chunk
+                }
+            )
 
 
 # =========================================================
-# TELEGRAM - TYPING INDICATOR
+# TYPING INDICATOR
 # =========================================================
 
 def send_typing_action(chat_id):
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/sendChatAction"
-    )
-
-    data = json.dumps({
-        "chat_id": chat_id,
-        "action": "typing"
-    }).encode("utf-8")
-
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type": "application/json"
-        }
-    )
 
     try:
-        with urllib.request.urlopen(request) as response:
-            response.read()
+        telegram_request(
+            "sendChatAction",
+            {
+                "chat_id": chat_id,
+                "action": "typing"
+            }
+        )
 
     except Exception:
         pass
 
 
 # =========================================================
-# TELEGRAM - DOWNLOAD FILE
+# DOWNLOAD TELEGRAM FILE
 # =========================================================
 
 def get_telegram_file(file_id):
 
-    get_file_url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/getFile"
-        f"?file_id={file_id}"
+    result = telegram_request(
+        f"getFile?file_id={file_id}"
     )
-
-    with urllib.request.urlopen(get_file_url) as response:
-        result = json.loads(
-            response.read().decode("utf-8")
-        )
 
     if not result.get("ok"):
         raise Exception("Telegram could not retrieve the file.")
@@ -208,14 +184,18 @@ def get_telegram_file(file_id):
         f"bot{TELEGRAM_TOKEN}/{file_path}"
     )
 
-    with urllib.request.urlopen(download_url) as response:
+    with urllib.request.urlopen(
+        download_url,
+        timeout=60
+    ) as response:
+
         file_data = response.read()
 
     return file_data, file_path
 
 
 # =========================================================
-# OPENROUTER - NORMAL TEXT
+# TEXT AI
 # =========================================================
 
 def ask_text_model(user_message):
@@ -239,25 +219,30 @@ def ask_text_model(user_message):
 
 
 # =========================================================
-# OPENROUTER - IMAGE
+# IMAGE AI
 # =========================================================
 
-def analyze_image(image_data, file_path, prompt):
+def analyze_image(image_data, file_name, prompt, mime_type=None):
 
     encoded_image = base64.b64encode(
         image_data
     ).decode("utf-8")
 
-    extension = file_path.lower().split(".")[-1]
+    lower_name = file_name.lower()
 
-    if extension == "png":
-        mime_type = "image/png"
+    if not mime_type or not mime_type.startswith("image/"):
 
-    elif extension == "webp":
-        mime_type = "image/webp"
+        if lower_name.endswith(".png"):
+            mime_type = "image/png"
 
-    else:
-        mime_type = "image/jpeg"
+        elif lower_name.endswith(".webp"):
+            mime_type = "image/webp"
+
+        elif lower_name.endswith(".gif"):
+            mime_type = "image/gif"
+
+        else:
+            mime_type = "image/jpeg"
 
     image_data_url = (
         f"data:{mime_type};base64,{encoded_image}"
@@ -293,7 +278,7 @@ def analyze_image(image_data, file_path, prompt):
 
 
 # =========================================================
-# OPENROUTER - PDF
+# PDF AI
 # =========================================================
 
 def analyze_pdf(file_data, file_name, prompt):
@@ -337,15 +322,16 @@ def analyze_pdf(file_data, file_name, prompt):
 
 
 # =========================================================
-# OPENROUTER - TEXT / CODE FILE
+# TEXT / CODE FILE AI
 # =========================================================
 
 def analyze_text_file(file_data, file_name, prompt):
 
-    # Maximum downloaded text/code file size
+    # 1 MB maximum for ordinary text/code files
     max_file_size = 1_000_000
 
     if len(file_data) > max_file_size:
+
         return (
             "📄 **File too large**\n\n"
             "Please upload a text or code file smaller than 1 MB."
@@ -360,27 +346,23 @@ def analyze_text_file(file_data, file_name, prompt):
             errors="replace"
         )
 
-    # Avoid sending extremely large text prompts
+    # Limit prompt size
     max_characters = 50_000
 
-    truncated = False
-
     if len(file_text) > max_characters:
-        file_text = file_text[:max_characters]
-        truncated = True
+
+        file_text = (
+            file_text[:max_characters]
+            + "\n\n[File truncated because it was too long.]"
+        )
 
     user_content = (
         f"{prompt}\n\n"
-        f"File name: {file_name}\n\n"
-        "FILE CONTENT:\n"
+        f"CURRENT FILE NAME: {file_name}\n\n"
+        "CURRENT FILE CONTENT:\n"
+        "--------------------\n"
         f"{file_text}"
     )
-
-    if truncated:
-        user_content += (
-            "\n\n"
-            "[The file was truncated because it was too long.]"
-        )
 
     completion = client.chat.completions.create(
         model=MODEL,
@@ -401,7 +383,7 @@ def analyze_text_file(file_data, file_name, prompt):
 
 
 # =========================================================
-# VERCEL WEBHOOK
+# WEBHOOK HANDLER
 # =========================================================
 
 class handler(BaseHTTPRequestHandler):
@@ -421,12 +403,10 @@ class handler(BaseHTTPRequestHandler):
 
         self.end_headers()
 
-        response = {
-            "status": "Telegram AI Bot is running"
-        }
-
         self.wfile.write(
-            json.dumps(response).encode("utf-8")
+            json.dumps({
+                "status": "Telegram AI Bot is running"
+            }).encode("utf-8")
         )
 
 
@@ -445,29 +425,48 @@ class handler(BaseHTTPRequestHandler):
                 )
             )
 
-            body = self.rfile.read(
-                content_length
-            )
+            body = self.rfile.read(content_length)
 
             update = json.loads(
                 body.decode("utf-8")
             )
 
-            message = update.get(
-                "message",
-                {}
+            # Log update ID so duplicate deliveries can be
+            # identified in Vercel logs.
+            update_id = update.get("update_id")
+
+            print(
+                f"Processing Telegram update_id={update_id}"
             )
 
-            chat = message.get(
-                "chat",
-                {}
-            )
+            message = update.get("message")
 
+            # Ignore Telegram update types we don't handle.
+            if not message:
+
+                self.send_json_response({
+                    "ok": True,
+                    "ignored": True
+                })
+
+                return
+
+            chat = message.get("chat", {})
             chat_id = chat.get("id")
 
-            # -------------------------------------------------
-            # Detect Telegram message type
-            # -------------------------------------------------
+            if not chat_id:
+
+                self.send_json_response({
+                    "ok": True,
+                    "ignored": True
+                })
+
+                return
+
+
+            # =================================================
+            # MESSAGE DATA
+            # =================================================
 
             user_message = message.get("text")
 
@@ -476,57 +475,152 @@ class handler(BaseHTTPRequestHandler):
                 []
             )
 
-            document = message.get(
-                "document"
-            )
+            document = message.get("document")
 
             caption = message.get(
                 "caption",
                 ""
             )
 
-            # -------------------------------------------------
-            # Process message
-            # -------------------------------------------------
 
-            if chat_id and (
-                user_message
-                or photos
-                or document
-            ):
+            # =================================================
+            # /START
+            # =================================================
 
-                # =============================================
-                # /START
-                # =============================================
+            if user_message == "/start":
 
-                if user_message == "/start":
+                reply = (
+                    "Hello! 👋\n\n"
+                    "I am your AI assistant powered by OpenRouter.\n\n"
+                    "You can send me:\n"
+                    "- Text questions\n"
+                    "- Images\n"
+                    "- Images sent as files\n"
+                    "- PDFs\n"
+                    "- Text and code files"
+                )
 
-                    reply = (
-                        "Hello! 👋\n\n"
-                        "I am your AI assistant powered by "
-                        "OpenRouter.\n\n"
-                        "You can send me:\n"
-                        "- Text questions\n"
-                        "- Images\n"
-                        "- PDFs\n"
-                        "- Text and code files"
+                send_telegram_message(
+                    chat_id,
+                    reply
+                )
+
+
+            # =================================================
+            # NORMAL TELEGRAM PHOTO
+            # =================================================
+
+            elif photos:
+
+                send_typing_action(chat_id)
+
+                # Telegram sends several resolutions.
+                # The last entry is normally the largest.
+                photo = photos[-1]
+
+                file_id = photo["file_id"]
+
+                image_data, file_path = (
+                    get_telegram_file(file_id)
+                )
+
+                image_prompt = (
+                    caption
+                    or
+                    "Describe and explain what is shown "
+                    "in this image."
+                )
+
+                reply = analyze_image(
+                    image_data=image_data,
+                    file_name=file_path,
+                    prompt=image_prompt
+                )
+
+                send_telegram_message(
+                    chat_id,
+                    reply
+                )
+
+
+            # =================================================
+            # DOCUMENT / FILE
+            # =================================================
+
+            elif document:
+
+                send_typing_action(chat_id)
+
+                file_id = document.get("file_id")
+
+                file_name = document.get(
+                    "file_name",
+                    "document"
+                )
+
+                mime_type = document.get(
+                    "mime_type",
+                    "application/octet-stream"
+                )
+
+                file_size = document.get(
+                    "file_size",
+                    0
+                )
+
+                # Prevent unexpectedly large uploads.
+                # Keep this conservative for serverless processing.
+                max_download_size = 10 * 1024 * 1024
+
+                if (
+                    file_size
+                    and file_size > max_download_size
+                ):
+
+                    send_telegram_message(
+                        chat_id,
+                        (
+                            "📄 **File too large**\n\n"
+                            "Please upload a file smaller than 10 MB."
+                        )
                     )
 
+                    self.send_json_response({
+                        "ok": True
+                    })
 
-                # =============================================
-                # IMAGE
-                # =============================================
+                    return
 
-                elif photos:
+                file_data, file_path = (
+                    get_telegram_file(file_id)
+                )
 
-                    send_typing_action(chat_id)
+                document_prompt = (
+                    caption
+                    or
+                    "Analyze this file carefully and explain "
+                    "its important contents."
+                )
 
-                    # Largest Telegram photo version
-                    file_id = photos[-1]["file_id"]
+                lower_name = file_name.lower()
 
-                    image_data, file_path = (
-                        get_telegram_file(file_id)
+
+                # ---------------------------------------------
+                # IMAGE UPLOADED USING TELEGRAM "FILE"
+                # ---------------------------------------------
+
+                if (
+                    mime_type.startswith("image/")
+                    or lower_name.endswith(
+                        (
+                            ".jpg",
+                            ".jpeg",
+                            ".png",
+                            ".webp",
+                            ".gif"
+                        )
                     )
+                ):
 
                     image_prompt = (
                         caption
@@ -536,132 +630,84 @@ class handler(BaseHTTPRequestHandler):
                     )
 
                     reply = analyze_image(
-                        image_data,
-                        file_path,
-                        image_prompt
+                        image_data=file_data,
+                        file_name=file_name,
+                        prompt=image_prompt,
+                        mime_type=mime_type
                     )
 
 
-                # =============================================
-                # DOCUMENT
-                # =============================================
+                # ---------------------------------------------
+                # PDF
+                # ---------------------------------------------
 
-                elif document:
+                elif (
+                    mime_type == "application/pdf"
+                    or lower_name.endswith(".pdf")
+                ):
 
-                    send_typing_action(chat_id)
-
-                    file_id = document.get(
-                        "file_id"
+                    reply = analyze_pdf(
+                        file_data=file_data,
+                        file_name=file_name,
+                        prompt=document_prompt
                     )
 
-                    file_name = document.get(
-                        "file_name",
-                        "document"
+
+                # ---------------------------------------------
+                # TEXT / CODE
+                # ---------------------------------------------
+
+                elif lower_name.endswith(
+                    (
+                        ".txt",
+                        ".md",
+                        ".py",
+                        ".c",
+                        ".cpp",
+                        ".h",
+                        ".hpp",
+                        ".java",
+                        ".js",
+                        ".ts",
+                        ".html",
+                        ".css",
+                        ".json",
+                        ".csv",
+                        ".xml",
+                        ".yaml",
+                        ".yml",
+                        ".sql"
+                    )
+                ):
+
+                    reply = analyze_text_file(
+                        file_data=file_data,
+                        file_name=file_name,
+                        prompt=document_prompt
                     )
 
-                    mime_type = document.get(
-                        "mime_type",
-                        "application/octet-stream"
-                    )
 
-                    file_data, file_path = (
-                        get_telegram_file(file_id)
-                    )
-
-                    document_prompt = (
-                        caption
-                        or
-                        "Analyze this file and explain "
-                        "its important contents."
-                    )
-
-                    # -----------------------------------------
-                    # PDF
-                    # -----------------------------------------
-
-                    if (
-                        mime_type == "application/pdf"
-                        or file_name.lower().endswith(".pdf")
-                    ):
-
-                        reply = analyze_pdf(
-                            file_data,
-                            file_name,
-                            document_prompt
-                        )
-
-
-                    # -----------------------------------------
-                    # TEXT / CODE FILE
-                    # -----------------------------------------
-
-                    else:
-
-                        supported_extensions = (
-                            ".txt",
-                            ".md",
-                            ".py",
-                            ".c",
-                            ".cpp",
-                            ".h",
-                            ".hpp",
-                            ".java",
-                            ".js",
-                            ".ts",
-                            ".html",
-                            ".css",
-                            ".json",
-                            ".csv",
-                            ".xml",
-                            ".yaml",
-                            ".yml",
-                            ".sql"
-                        )
-
-                        if file_name.lower().endswith(
-                            supported_extensions
-                        ):
-
-                            reply = analyze_text_file(
-                                file_data,
-                                file_name,
-                                document_prompt
-                            )
-
-                        else:
-
-                            reply = (
-                                "📄 **Unsupported file type**\n\n"
-                                "Currently I can analyze:\n"
-                                "- PDF\n"
-                                "- TXT / Markdown\n"
-                                "- Python\n"
-                                "- C / C++\n"
-                                "- Java\n"
-                                "- JavaScript / TypeScript\n"
-                                "- HTML / CSS\n"
-                                "- JSON / CSV\n"
-                                "- XML / YAML\n"
-                                "- SQL"
-                            )
-
-
-                # =============================================
-                # NORMAL TEXT
-                # =============================================
+                # ---------------------------------------------
+                # UNSUPPORTED
+                # ---------------------------------------------
 
                 else:
 
-                    send_typing_action(chat_id)
-
-                    reply = ask_text_model(
-                        user_message
+                    reply = (
+                        "📄 **Unsupported file type**\n\n"
+                        "Currently I can analyze:\n"
+                        "- JPG / JPEG / PNG / WEBP\n"
+                        "- PDF\n"
+                        "- TXT / Markdown\n"
+                        "- Python\n"
+                        "- C / C++\n"
+                        "- Java\n"
+                        "- JavaScript / TypeScript\n"
+                        "- HTML / CSS\n"
+                        "- JSON / CSV\n"
+                        "- XML / YAML\n"
+                        "- SQL"
                     )
-
-
-                # =============================================
-                # SEND RESPONSE
-                # =============================================
 
                 send_telegram_message(
                     chat_id,
@@ -669,29 +715,52 @@ class handler(BaseHTTPRequestHandler):
                 )
 
 
-            # -------------------------------------------------
-            # Return success to Telegram
-            # -------------------------------------------------
+            # =================================================
+            # NORMAL TEXT
+            # =================================================
 
-            self.send_response(200)
+            elif user_message:
 
-            self.send_header(
-                "Content-Type",
-                "application/json"
-            )
+                send_typing_action(chat_id)
 
-            self.end_headers()
+                reply = ask_text_model(
+                    user_message
+                )
 
-            self.wfile.write(
-                json.dumps({
-                    "ok": True
-                }).encode("utf-8")
-            )
+                send_telegram_message(
+                    chat_id,
+                    reply
+                )
 
 
-        # -----------------------------------------------------
+            # =================================================
+            # UNSUPPORTED TELEGRAM MESSAGE
+            # =================================================
+
+            else:
+
+                send_telegram_message(
+                    chat_id,
+                    (
+                        "I currently support text, images, PDFs, "
+                        "and common text/code files."
+                    )
+                )
+
+
+            # =================================================
+            # SUCCESS
+            # =================================================
+
+            self.send_json_response({
+                "ok": True,
+                "update_id": update_id
+            })
+
+
+        # =====================================================
         # ERROR
-        # -----------------------------------------------------
+        # =====================================================
 
         except Exception as error:
 
@@ -700,18 +769,29 @@ class handler(BaseHTTPRequestHandler):
                 repr(error)
             )
 
-            self.send_response(200)
+            # Return 200 so Telegram does not continuously
+            # retry a permanently failing update.
+            self.send_json_response({
+                "ok": False,
+                "error": str(error)
+            })
 
-            self.send_header(
-                "Content-Type",
-                "application/json"
-            )
 
-            self.end_headers()
+    # -----------------------------------------------------
+    # JSON RESPONSE HELPER
+    # -----------------------------------------------------
 
-            self.wfile.write(
-                json.dumps({
-                    "ok": False,
-                    "error": str(error)
-                }).encode("utf-8")
-            )
+    def send_json_response(self, data):
+
+        self.send_response(200)
+
+        self.send_header(
+            "Content-Type",
+            "application/json"
+        )
+
+        self.end_headers()
+
+        self.wfile.write(
+            json.dumps(data).encode("utf-8")
+        )
