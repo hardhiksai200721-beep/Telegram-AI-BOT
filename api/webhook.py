@@ -111,7 +111,7 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     send_typing_action(chat_id)
                     completion = client.chat.completions.create(
-                        model="qwen/qwen3.6-plus-preview:free",
+                        model="google/gemma-4-26b-a4b-it:free",
                         max_tokens=700,
                         messages=[
                             {
