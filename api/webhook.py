@@ -111,7 +111,7 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     send_typing_action(chat_id)
                     completion = client.chat.completions.create(
-                        model="google/gemma-4-31b-it:free",
+                        model="openai/gpt-oss-20b:free",
                         max_tokens=700,
                         messages=[
                             {
