@@ -18,9 +18,11 @@ client = OpenAI(
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
+    # First try sending with Markdown formatting
     data = json.dumps({
         "chat_id": chat_id,
-        "text": text
+        "text": text,
+        "parse_mode": "Markdown"
     }).encode("utf-8")
 
     request = urllib.request.Request(
@@ -29,8 +31,26 @@ def send_telegram_message(chat_id, text):
         headers={"Content-Type": "application/json"}
     )
 
-    with urllib.request.urlopen(request) as response:
-        return response.read()
+    try:
+        with urllib.request.urlopen(request) as response:
+            return response.read()
+
+    except Exception:
+        # If Markdown formatting causes an error,
+        # send the same answer as normal text
+        fallback_data = json.dumps({
+            "chat_id": chat_id,
+            "text": text
+        }).encode("utf-8")
+
+        fallback_request = urllib.request.Request(
+            url,
+            data=fallback_data,
+            headers={"Content-Type": "application/json"}
+        )
+
+        with urllib.request.urlopen(fallback_request) as response:
+            return response.read()
 
 
 class handler(BaseHTTPRequestHandler):
@@ -76,9 +96,28 @@ class handler(BaseHTTPRequestHandler):
                         model="openrouter/free",
                         messages=[
                             {
-                                "role": "system",
-                                "content": "You are a helpful AI assistant."
+                                    "role": "system",
+                                    "content": """
+                        You are a helpful AI assistant responding through Telegram.
+
+                        Write answers in a clean, modern, ChatGPT-like style.
+
+                        Formatting rules:
+                        - Start directly with the answer.
+                        - Use clear headings when they improve readability.
+                        - Use short paragraphs.
+                        - Use bullet points for lists.
+                        - Use numbered steps for procedures.
+                        - Highlight important words using **bold**.
+                        - Put programming code inside triple-backtick code blocks.
+                        - Include examples when useful.
+                        - Avoid unnecessary repetition.
+                        - Use emojis sparingly and only when they improve clarity.
+                        - For simple questions, give concise answers.
+                        - For technical or complex questions, provide a structured explanation.
+                        """
                             },
+                
                             {
                                 "role": "user",
                                 "content": user_message
