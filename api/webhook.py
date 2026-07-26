@@ -8,21 +8,86 @@ from openai import OpenAI
 
 
 # =========================================================
-# ENVIRONMENT VARIABLES
+# CONFIGURATION
 # =========================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-
-# =========================================================
-# OPENROUTER CLIENT
-# =========================================================
+MODEL = "google/gemma-4-26b-a4b-it:free"
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
 )
+
+
+# =========================================================
+# SYSTEM PROMPT
+# =========================================================
+
+SYSTEM_PROMPT = """
+You are a helpful AI assistant responding through Telegram.
+
+Your answers must be clean, readable, professional, and optimized
+specifically for Telegram.
+
+FORMATTING:
+
+- Start directly with the answer.
+- Use **bold section headings** when useful.
+- Keep paragraphs short.
+- Leave one blank line between sections.
+- Use "- " for bullet lists.
+- Use "1.", "2.", "3." for numbered steps.
+- Use **bold** for important terms, but do not overuse it.
+- Use emojis sparingly.
+- Never generate Markdown tables.
+- Convert tables into readable bullet-point comparisons.
+
+CODE:
+
+- Put programming code inside triple-backtick code blocks.
+- Mention the programming language when appropriate.
+- Explain code separately from the code block.
+- If the user asks to debug code, explain the problem and provide
+  corrected code when possible.
+
+TECHNICAL QUESTIONS:
+
+- Give a short explanation first.
+- Then explain important concepts using sections or bullet points.
+- Include simple examples when useful.
+
+SIMPLE QUESTIONS:
+
+- Give concise answers.
+- Do not create unnecessary sections.
+
+IMAGE ANALYSIS:
+
+- Carefully inspect the supplied image.
+- Explain important visible information.
+- Read visible text when possible.
+- Explain screenshots, diagrams, errors, objects, or scenes.
+- If an error is visible, explain it and suggest possible fixes.
+- Never claim to see information that cannot be determined.
+
+DOCUMENT ANALYSIS:
+
+- Carefully analyze the supplied document or file.
+- Follow the user's instruction or caption.
+- If no specific instruction is provided, summarize and explain
+  the important contents.
+- For source-code files, explain the code and identify errors when useful.
+- Do not invent content that is not present in the file.
+
+ACCURACY:
+
+- Do not invent facts.
+- If information is uncertain, clearly say so.
+- Do not add irrelevant information.
+"""
 
 
 # =========================================================
@@ -32,38 +97,57 @@ client = OpenAI(
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    # First try Markdown formatting
-    data = json.dumps({
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
-    }).encode("utf-8")
+    # Telegram has a message-size limit.
+    # Split very long responses into smaller messages.
+    max_length = 4000
 
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"}
-    )
+    if not text:
+        text = "I couldn't generate a response."
 
-    try:
-        with urllib.request.urlopen(request) as response:
-            return response.read()
+    chunks = [
+        text[i:i + max_length]
+        for i in range(0, len(text), max_length)
+    ]
 
-    except Exception:
-        # If Markdown fails, send as normal text
-        fallback_data = json.dumps({
+    for chunk in chunks:
+
+        # First try Markdown
+        data = json.dumps({
             "chat_id": chat_id,
-            "text": text
+            "text": chunk,
+            "parse_mode": "Markdown"
         }).encode("utf-8")
 
-        fallback_request = urllib.request.Request(
+        request = urllib.request.Request(
             url,
-            data=fallback_data,
-            headers={"Content-Type": "application/json"}
+            data=data,
+            headers={
+                "Content-Type": "application/json"
+            }
         )
 
-        with urllib.request.urlopen(fallback_request) as response:
-            return response.read()
+        try:
+            with urllib.request.urlopen(request) as response:
+                response.read()
+
+        except Exception:
+
+            # If Markdown parsing fails, send plain text
+            fallback_data = json.dumps({
+                "chat_id": chat_id,
+                "text": chunk
+            }).encode("utf-8")
+
+            fallback_request = urllib.request.Request(
+                url,
+                data=fallback_data,
+                headers={
+                    "Content-Type": "application/json"
+                }
+            )
+
+            with urllib.request.urlopen(fallback_request) as response:
+                response.read()
 
 
 # =========================================================
@@ -71,7 +155,10 @@ def send_telegram_message(chat_id, text):
 # =========================================================
 
 def send_typing_action(chat_id):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendChatAction"
+    )
 
     data = json.dumps({
         "chat_id": chat_id,
@@ -81,11 +168,14 @@ def send_typing_action(chat_id):
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"}
+        headers={
+            "Content-Type": "application/json"
+        }
     )
 
     try:
-        urllib.request.urlopen(request).read()
+        with urllib.request.urlopen(request) as response:
+            response.read()
 
     except Exception:
         pass
@@ -97,20 +187,22 @@ def send_typing_action(chat_id):
 
 def get_telegram_file(file_id):
 
-    # Ask Telegram for the file path
-    url = (
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile"
+    get_file_url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/getFile"
         f"?file_id={file_id}"
     )
 
-    with urllib.request.urlopen(url) as response:
+    with urllib.request.urlopen(get_file_url) as response:
         result = json.loads(
             response.read().decode("utf-8")
         )
 
+    if not result.get("ok"):
+        raise Exception("Telegram could not retrieve the file.")
+
     file_path = result["result"]["file_path"]
 
-    # Download the actual file
     download_url = (
         f"https://api.telegram.org/file/"
         f"bot{TELEGRAM_TOKEN}/{file_path}"
@@ -123,37 +215,189 @@ def get_telegram_file(file_id):
 
 
 # =========================================================
-# SYSTEM PROMPT
+# OPENROUTER - NORMAL TEXT
 # =========================================================
 
-SYSTEM_PROMPT = """
-You are a helpful AI assistant responding through Telegram.
+def ask_text_model(user_message):
 
-Write answers in a clean, modern, ChatGPT-like style.
+    completion = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=700,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": user_message
+            }
+        ]
+    )
 
-Formatting rules:
+    return completion.choices[0].message.content
 
-- Start directly with the answer.
-- Use clear headings when they improve readability.
-- Use short paragraphs.
-- Use bullet points for lists.
-- Use numbered steps for procedures.
-- Highlight important words using **bold**.
-- Put programming code inside triple-backtick code blocks.
-- Include examples when useful.
-- Avoid unnecessary repetition.
-- Use emojis sparingly and only when they improve clarity.
-- For simple questions, give concise answers.
-- For technical or complex questions, provide a structured explanation.
 
-When analyzing images:
+# =========================================================
+# OPENROUTER - IMAGE
+# =========================================================
 
-- Carefully inspect the image.
-- Describe important visible information.
-- Read visible text when possible.
-- Explain screenshots, diagrams, errors, objects, or scenes.
-- If something cannot be determined reliably, say so instead of guessing.
-"""
+def analyze_image(image_data, file_path, prompt):
+
+    encoded_image = base64.b64encode(
+        image_data
+    ).decode("utf-8")
+
+    extension = file_path.lower().split(".")[-1]
+
+    if extension == "png":
+        mime_type = "image/png"
+
+    elif extension == "webp":
+        mime_type = "image/webp"
+
+    else:
+        mime_type = "image/jpeg"
+
+    image_data_url = (
+        f"data:{mime_type};base64,{encoded_image}"
+    )
+
+    completion = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=700,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_data_url
+                        }
+                    }
+                ]
+            }
+        ]
+    )
+
+    return completion.choices[0].message.content
+
+
+# =========================================================
+# OPENROUTER - PDF
+# =========================================================
+
+def analyze_pdf(file_data, file_name, prompt):
+
+    encoded_file = base64.b64encode(
+        file_data
+    ).decode("utf-8")
+
+    pdf_data_url = (
+        f"data:application/pdf;base64,{encoded_file}"
+    )
+
+    completion = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=700,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "file",
+                        "file": {
+                            "filename": file_name,
+                            "file_data": pdf_data_url
+                        }
+                    }
+                ]
+            }
+        ]
+    )
+
+    return completion.choices[0].message.content
+
+
+# =========================================================
+# OPENROUTER - TEXT / CODE FILE
+# =========================================================
+
+def analyze_text_file(file_data, file_name, prompt):
+
+    # Maximum downloaded text/code file size
+    max_file_size = 1_000_000
+
+    if len(file_data) > max_file_size:
+        return (
+            "📄 **File too large**\n\n"
+            "Please upload a text or code file smaller than 1 MB."
+        )
+
+    try:
+        file_text = file_data.decode("utf-8")
+
+    except UnicodeDecodeError:
+        file_text = file_data.decode(
+            "utf-8",
+            errors="replace"
+        )
+
+    # Avoid sending extremely large text prompts
+    max_characters = 50_000
+
+    truncated = False
+
+    if len(file_text) > max_characters:
+        file_text = file_text[:max_characters]
+        truncated = True
+
+    user_content = (
+        f"{prompt}\n\n"
+        f"File name: {file_name}\n\n"
+        "FILE CONTENT:\n"
+        f"{file_text}"
+    )
+
+    if truncated:
+        user_content += (
+            "\n\n"
+            "[The file was truncated because it was too long.]"
+        )
+
+    completion = client.chat.completions.create(
+        model=MODEL,
+        max_tokens=700,
+        messages=[
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": user_content
+            }
+        ]
+    )
+
+    return completion.choices[0].message.content
 
 
 # =========================================================
@@ -163,27 +407,31 @@ When analyzing images:
 class handler(BaseHTTPRequestHandler):
 
     # -----------------------------------------------------
-    # GET REQUEST
+    # GET
     # -----------------------------------------------------
 
     def do_GET(self):
 
         self.send_response(200)
+
         self.send_header(
             "Content-Type",
             "application/json"
         )
+
         self.end_headers()
 
+        response = {
+            "status": "Telegram AI Bot is running"
+        }
+
         self.wfile.write(
-            json.dumps({
-                "status": "Telegram AI Bot is running"
-            }).encode("utf-8")
+            json.dumps(response).encode("utf-8")
         )
 
 
     # -----------------------------------------------------
-    # POST REQUEST FROM TELEGRAM
+    # POST
     # -----------------------------------------------------
 
     def do_POST(self):
@@ -217,9 +465,9 @@ class handler(BaseHTTPRequestHandler):
 
             chat_id = chat.get("id")
 
-            # ---------------------------------------------
-            # Detect Telegram message types
-            # ---------------------------------------------
+            # -------------------------------------------------
+            # Detect Telegram message type
+            # -------------------------------------------------
 
             user_message = message.get("text")
 
@@ -237,10 +485,9 @@ class handler(BaseHTTPRequestHandler):
                 ""
             )
 
-
-            # ---------------------------------------------
-            # Process supported messages
-            # ---------------------------------------------
+            # -------------------------------------------------
+            # Process message
+            # -------------------------------------------------
 
             if chat_id and (
                 user_message
@@ -248,210 +495,173 @@ class handler(BaseHTTPRequestHandler):
                 or document
             ):
 
-                # -----------------------------------------
-                # /start command
-                # -----------------------------------------
+                # =============================================
+                # /START
+                # =============================================
 
                 if user_message == "/start":
 
                     reply = (
                         "Hello! 👋\n\n"
-                        "I am your AI assistant powered "
-                        "by OpenRouter.\n\n"
-                        "You can send me text questions "
-                        "or images for analysis."
+                        "I am your AI assistant powered by "
+                        "OpenRouter.\n\n"
+                        "You can send me:\n"
+                        "- Text questions\n"
+                        "- Images\n"
+                        "- PDFs\n"
+                        "- Text and code files"
                     )
 
 
-                # -----------------------------------------
-                # IMAGE MESSAGE
-                # -----------------------------------------
+                # =============================================
+                # IMAGE
+                # =============================================
 
                 elif photos:
 
-                    send_typing_action(
-                        chat_id
-                    )
+                    send_typing_action(chat_id)
 
-                    # Telegram provides multiple sizes.
-                    # The final one is generally the
-                    # largest available version.
-                    file_id = photos[-1][
-                        "file_id"
-                    ]
+                    # Largest Telegram photo version
+                    file_id = photos[-1]["file_id"]
 
                     image_data, file_path = (
-                        get_telegram_file(
-                            file_id
-                        )
+                        get_telegram_file(file_id)
                     )
 
-                    # Convert image to Base64
-                    encoded_image = (
-                        base64.b64encode(
-                            image_data
-                        ).decode("utf-8")
+                    image_prompt = (
+                        caption
+                        or
+                        "Describe and explain what is shown "
+                        "in this image."
                     )
 
-                    # -------------------------------------
-                    # Determine image MIME type
-                    # -------------------------------------
-
-                    extension = (
-                        file_path
-                        .lower()
-                        .split(".")[-1]
-                    )
-
-                    if extension == "png":
-
-                        mime_type = (
-                            "image/png"
-                        )
-
-                    elif extension == "webp":
-
-                        mime_type = (
-                            "image/webp"
-                        )
-
-                    else:
-
-                        mime_type = (
-                            "image/jpeg"
-                        )
-
-
-                    # -------------------------------------
-                    # Build Base64 image URL
-                    # -------------------------------------
-
-                    image_url = (
-                        f"data:{mime_type};"
-                        f"base64,{encoded_image}"
+                    reply = analyze_image(
+                        image_data,
+                        file_path,
+                        image_prompt
                     )
 
 
-                    # -------------------------------------
-                    # Use caption as image question
-                    # -------------------------------------
-
-                    if caption:
-
-                        image_prompt = caption
-
-                    else:
-
-                        image_prompt = (
-                            "Describe and explain "
-                            "what is shown in this image."
-                        )
-
-
-                    # -------------------------------------
-                    # Send image to Gemma
-                    # -------------------------------------
-
-                    completion = (
-                        client.chat.completions.create(
-
-                            model=(
-                                "google/"
-                                "gemma-4-26b-a4b-it:free"
-                            ),
-
-                            max_tokens=700,
-
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": SYSTEM_PROMPT
-                                },
-                                {
-                                    "role": "user",
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": image_prompt
-                                        },
-                                        {
-                                            "type": "image_url",
-                                            "image_url": {
-                                                "url": image_url
-                                            }
-                                        }
-                                    ]
-                                }
-                            ]
-                        )
-                    )
-
-                    reply = (
-                        completion
-                        .choices[0]
-                        .message
-                        .content
-                    )
-
-
-                # -----------------------------------------
+                # =============================================
                 # DOCUMENT
-                # -----------------------------------------
+                # =============================================
 
                 elif document:
 
-                    reply = (
-                        "📄 I detected your file.\n\n"
-                        "Document analysis is being "
-                        "added next. For now, please "
-                        "send text or an image."
+                    send_typing_action(chat_id)
+
+                    file_id = document.get(
+                        "file_id"
                     )
 
+                    file_name = document.get(
+                        "file_name",
+                        "document"
+                    )
 
-                # -----------------------------------------
-                # NORMAL TEXT MESSAGE
-                # -----------------------------------------
+                    mime_type = document.get(
+                        "mime_type",
+                        "application/octet-stream"
+                    )
+
+                    file_data, file_path = (
+                        get_telegram_file(file_id)
+                    )
+
+                    document_prompt = (
+                        caption
+                        or
+                        "Analyze this file and explain "
+                        "its important contents."
+                    )
+
+                    # -----------------------------------------
+                    # PDF
+                    # -----------------------------------------
+
+                    if (
+                        mime_type == "application/pdf"
+                        or file_name.lower().endswith(".pdf")
+                    ):
+
+                        reply = analyze_pdf(
+                            file_data,
+                            file_name,
+                            document_prompt
+                        )
+
+
+                    # -----------------------------------------
+                    # TEXT / CODE FILE
+                    # -----------------------------------------
+
+                    else:
+
+                        supported_extensions = (
+                            ".txt",
+                            ".md",
+                            ".py",
+                            ".c",
+                            ".cpp",
+                            ".h",
+                            ".hpp",
+                            ".java",
+                            ".js",
+                            ".ts",
+                            ".html",
+                            ".css",
+                            ".json",
+                            ".csv",
+                            ".xml",
+                            ".yaml",
+                            ".yml",
+                            ".sql"
+                        )
+
+                        if file_name.lower().endswith(
+                            supported_extensions
+                        ):
+
+                            reply = analyze_text_file(
+                                file_data,
+                                file_name,
+                                document_prompt
+                            )
+
+                        else:
+
+                            reply = (
+                                "📄 **Unsupported file type**\n\n"
+                                "Currently I can analyze:\n"
+                                "- PDF\n"
+                                "- TXT / Markdown\n"
+                                "- Python\n"
+                                "- C / C++\n"
+                                "- Java\n"
+                                "- JavaScript / TypeScript\n"
+                                "- HTML / CSS\n"
+                                "- JSON / CSV\n"
+                                "- XML / YAML\n"
+                                "- SQL"
+                            )
+
+
+                # =============================================
+                # NORMAL TEXT
+                # =============================================
 
                 else:
 
-                    send_typing_action(
-                        chat_id
-                    )
+                    send_typing_action(chat_id)
 
-                    completion = (
-                        client.chat.completions.create(
-
-                            model=(
-                                "google/"
-                                "gemma-4-26b-a4b-it:free"
-                            ),
-
-                            max_tokens=700,
-
-                            messages=[
-                                {
-                                    "role": "system",
-                                    "content": SYSTEM_PROMPT
-                                },
-                                {
-                                    "role": "user",
-                                    "content": user_message
-                                }
-                            ]
-                        )
-                    )
-
-                    reply = (
-                        completion
-                        .choices[0]
-                        .message
-                        .content
+                    reply = ask_text_model(
+                        user_message
                     )
 
 
-                # -----------------------------------------
-                # Send final answer to Telegram
-                # -----------------------------------------
+                # =============================================
+                # SEND RESPONSE
+                # =============================================
 
                 send_telegram_message(
                     chat_id,
@@ -459,9 +669,9 @@ class handler(BaseHTTPRequestHandler):
                 )
 
 
-            # ---------------------------------------------
-            # Tell Telegram request succeeded
-            # ---------------------------------------------
+            # -------------------------------------------------
+            # Return success to Telegram
+            # -------------------------------------------------
 
             self.send_response(200)
 
@@ -479,15 +689,15 @@ class handler(BaseHTTPRequestHandler):
             )
 
 
-        # -------------------------------------------------
-        # ERROR HANDLING
-        # -------------------------------------------------
+        # -----------------------------------------------------
+        # ERROR
+        # -----------------------------------------------------
 
         except Exception as error:
 
             print(
                 "Webhook Error:",
-                error
+                repr(error)
             )
 
             self.send_response(200)
