@@ -7,4 +7,4 @@ dependencies = [
 ]
 
 [tool.vercel]
-entrypoint = "api.webhook:handler"
+entrypoint = "api.process:handler"
