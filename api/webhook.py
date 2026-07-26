@@ -52,7 +52,24 @@ def send_telegram_message(chat_id, text):
         with urllib.request.urlopen(fallback_request) as response:
             return response.read()
 
+def send_typing_action(chat_id):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendChatAction"
 
+    data = json.dumps({
+        "chat_id": chat_id,
+        "action": "typing"
+    }).encode("utf-8")
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"}
+    )
+
+    try:
+        urllib.request.urlopen(request).read()
+    except Exception:
+        pass
 class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
@@ -92,8 +109,10 @@ class handler(BaseHTTPRequestHandler):
                     )
 
                 else:
+                    send_typing_action(chat_id)
                     completion = client.chat.completions.create(
-                        model="openrouter/free",
+                        model="google/gemma-4-31b-it:free",
+                        max_tokens=700,
                         messages=[
                             {
                                     "role": "system",
