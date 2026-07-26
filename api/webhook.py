@@ -111,7 +111,7 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     send_typing_action(chat_id)
                     completion = client.chat.completions.create(
-                        model="openai/gpt-oss-20b:free",
+                        model="qwen/qwen3.6-plus-preview:free",
                         max_tokens=700,
                         messages=[
                             {
