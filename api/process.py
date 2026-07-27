@@ -1,10 +1,19 @@
 import os
 import json
 import urllib.request
+import re
+import uuid
+import tempfile
+from xml.sax.saxutils import escape
 
 from http.server import BaseHTTPRequestHandler
 from google import genai
 from google.genai import types
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 
 # =========================================================
@@ -20,7 +29,16 @@ MODEL = "gemini-3.1-flash-lite"
 if not GEMINI_API_KEY:
     print("WARNING: GEMINI_API_KEY is missing.")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+
+def get_gemini_client():
+    """Create the Gemini client only when an AI request is actually made."""
+    if not GEMINI_API_KEY:
+        raise RuntimeError(
+            "GEMINI_API_KEY is missing. "
+            "Set it in your environment or Vercel Environment Variables."
+        )
+
+    return genai.Client(api_key=GEMINI_API_KEY)
 
 
 # =========================================================
@@ -96,6 +114,230 @@ def get_response_text(response):
         "I couldn't generate a text response for this request. "
         "Please try again."
     )
+
+
+
+# =========================================================
+# PDF GENERATION
+# =========================================================
+
+def is_pdf_generation_request(text):
+    if not text:
+        return False
+
+    lower = text.lower().strip()
+
+    return (
+        "pdf" in lower
+        and any(
+            word in lower
+            for word in (
+                "create",
+                "generate",
+                "make",
+                "prepare",
+                "build",
+                "give me",
+            )
+        )
+    )
+
+
+def clean_pdf_topic(user_message):
+    topic = user_message.strip()
+
+    patterns = [
+        r"(?i)\bcreate\s+(?:a\s+)?pdf(?:\s+file|\s+document)?\s*(?:about|on|for)?\s*",
+        r"(?i)\bgenerate\s+(?:a\s+)?pdf(?:\s+file|\s+document)?\s*(?:about|on|for)?\s*",
+        r"(?i)\bmake\s+(?:me\s+)?(?:a\s+)?pdf(?:\s+file|\s+document)?\s*(?:about|on|for)?\s*",
+        r"(?i)\bprepare\s+(?:a\s+)?pdf(?:\s+file|\s+document)?\s*(?:about|on|for)?\s*",
+        r"(?i)\bgive\s+me\s+(?:a\s+)?pdf(?:\s+file|\s+document)?\s*(?:about|on|for)?\s*",
+    ]
+
+    for pattern in patterns:
+        topic = re.sub(pattern, "", topic).strip()
+
+    return topic or "Requested Topic"
+
+
+def generate_pdf_content(user_message):
+    prompt = f"""
+Create high-quality content for a PDF requested by the user.
+
+USER REQUEST:
+{user_message}
+
+Requirements:
+- Start with a clear title using "# ".
+- Give a short introduction.
+- Organize the content into logical sections using "## ".
+- Use clear explanations.
+- Use "- " for bullet points where useful.
+- Include examples when appropriate.
+- Do not say that you cannot create a PDF.
+- Do not provide manual PDF-conversion instructions.
+- Do not use Markdown tables.
+- Return only the content that belongs inside the PDF.
+"""
+
+    response = get_gemini_client().models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            max_output_tokens=3000,
+        ),
+    )
+
+    return get_response_text(response)
+
+
+def make_safe_filename(topic):
+    safe_name = re.sub(
+        r"[^a-zA-Z0-9_-]+",
+        "_",
+        topic,
+    ).strip("_")[:60]
+
+    if not safe_name:
+        safe_name = "generated_document"
+
+    return f"{safe_name}.pdf"
+
+
+def create_pdf_file(content, topic):
+    filename = make_safe_filename(topic)
+
+    file_path = os.path.join(
+        tempfile.gettempdir(),
+        f"{uuid.uuid4().hex}_{filename}",
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "CustomTitle",
+        parent=styles["Title"],
+        alignment=TA_CENTER,
+        fontSize=20,
+        leading=24,
+        spaceAfter=18,
+    )
+
+    heading_style = ParagraphStyle(
+        "CustomHeading",
+        parent=styles["Heading2"],
+        fontSize=14,
+        leading=18,
+        spaceBefore=12,
+        spaceAfter=8,
+    )
+
+    body_style = ParagraphStyle(
+        "CustomBody",
+        parent=styles["BodyText"],
+        fontSize=10.5,
+        leading=15,
+        spaceAfter=8,
+    )
+
+    bullet_style = ParagraphStyle(
+        "CustomBullet",
+        parent=body_style,
+        leftIndent=18,
+        firstLineIndent=-8,
+    )
+
+    document = SimpleDocTemplate(
+        file_path,
+        pagesize=A4,
+        rightMargin=0.65 * inch,
+        leftMargin=0.65 * inch,
+        topMargin=0.65 * inch,
+        bottomMargin=0.65 * inch,
+        title=topic,
+        author="Hardhik's Personal Assistant",
+    )
+
+    story = []
+    first_added = False
+    in_code_block = False
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+
+        if not line:
+            story.append(Spacer(1, 6))
+            continue
+
+        safe_line = escape(line)
+        safe_line = safe_line.replace("**", "").replace("__", "")
+
+        if in_code_block:
+            story.append(
+                Paragraph(
+                    f'<font name="Courier">{safe_line}</font>',
+                    body_style,
+                )
+            )
+
+        elif safe_line.startswith("# "):
+            story.append(
+                Paragraph(
+                    safe_line[2:].strip(),
+                    title_style,
+                )
+            )
+
+        elif safe_line.startswith("## "):
+            story.append(
+                Paragraph(
+                    safe_line[3:].strip(),
+                    heading_style,
+                )
+            )
+
+        elif safe_line.startswith("### "):
+            story.append(
+                Paragraph(
+                    safe_line[4:].strip(),
+                    heading_style,
+                )
+            )
+
+        elif safe_line.startswith(("- ", "* ")):
+            story.append(
+                Paragraph(
+                    f"&#8226; {safe_line[2:].strip()}",
+                    bullet_style,
+                )
+            )
+
+        else:
+            story.append(
+                Paragraph(
+                    safe_line,
+                    body_style if first_added else title_style,
+                )
+            )
+
+        first_added = True
+
+    if not story:
+        story.append(
+            Paragraph(
+                escape(topic),
+                title_style,
+            )
+        )
+
+    document.build(story)
+
+    return file_path, filename
 
 
 # =========================================================
@@ -181,6 +423,94 @@ def send_typing_action(chat_id):
         print("Typing indicator failed:", repr(error))
 
 
+
+# =========================================================
+# TELEGRAM DOCUMENT UPLOAD
+# =========================================================
+
+def send_telegram_document(
+    chat_id,
+    file_path,
+    filename,
+    caption=None,
+):
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing.")
+
+    boundary = "----TelegramBotBoundary" + uuid.uuid4().hex
+    body = bytearray()
+
+    def add_field(name, value):
+        body.extend(
+            f"--{boundary}\r\n".encode("utf-8")
+        )
+        body.extend(
+            (
+                f'Content-Disposition: form-data; '
+                f'name="{name}"\r\n\r\n'
+            ).encode("utf-8")
+        )
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+
+    add_field("chat_id", chat_id)
+
+    if caption:
+        add_field("caption", caption)
+
+    with open(file_path, "rb") as pdf_file:
+        file_data = pdf_file.read()
+
+    body.extend(
+        f"--{boundary}\r\n".encode("utf-8")
+    )
+    body.extend(
+        (
+            'Content-Disposition: form-data; '
+            f'name="document"; filename="{filename}"\r\n'
+        ).encode("utf-8")
+    )
+    body.extend(
+        b"Content-Type: application/pdf\r\n\r\n"
+    )
+    body.extend(file_data)
+    body.extend(b"\r\n")
+    body.extend(
+        f"--{boundary}--\r\n".encode("utf-8")
+    )
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_TOKEN}/sendDocument"
+    )
+
+    request = urllib.request.Request(
+        url,
+        data=bytes(body),
+        headers={
+            "Content-Type": (
+                f"multipart/form-data; boundary={boundary}"
+            )
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=60,
+    ) as response:
+        result = json.loads(
+            response.read().decode("utf-8")
+        )
+
+    if not result.get("ok"):
+        raise RuntimeError(
+            "Telegram could not send the PDF."
+        )
+
+    return result
+
+
 # =========================================================
 # DOWNLOAD TELEGRAM FILE
 # =========================================================
@@ -213,7 +543,7 @@ def get_telegram_file(file_id):
 
 def ask_text_model(user_message):
 
-    response = client.models.generate_content(
+    response = get_gemini_client().models.generate_content(
         model=MODEL,
         contents=user_message,
         config=gemini_config(),
@@ -254,7 +584,7 @@ def analyze_image(
         mime_type=mime_type,
     )
 
-    response = client.models.generate_content(
+    response = get_gemini_client().models.generate_content(
         model=MODEL,
         contents=[
             prompt,
@@ -286,7 +616,7 @@ def analyze_pdf(
         f"Document name: {file_name}"
     )
 
-    response = client.models.generate_content(
+    response = get_gemini_client().models.generate_content(
         model=MODEL,
         contents=[
             full_prompt,
@@ -341,7 +671,7 @@ def analyze_text_file(
         f"{file_text}"
     )
 
-    response = client.models.generate_content(
+    response = get_gemini_client().models.generate_content(
         model=MODEL,
         contents=user_content,
         config=gemini_config(),
@@ -449,7 +779,8 @@ def process_update(update):
                 "- Images\n"
                 "- Images sent as files\n"
                 "- PDFs\n"
-                "- Text and code files"
+                "- Text and code files\n"
+                "- Generate PDF documents"
             ),
         )
 
@@ -667,6 +998,56 @@ def process_update(update):
         send_typing_action(chat_id)
 
         try:
+            # PDF GENERATION
+            if is_pdf_generation_request(user_message):
+                topic = clean_pdf_topic(user_message)
+
+                send_telegram_message(
+                    chat_id,
+                    "📄 Creating your PDF. Please wait...",
+                )
+
+                pdf_content = generate_pdf_content(
+                    user_message
+                )
+
+                pdf_path = None
+
+                try:
+                    pdf_path, pdf_filename = create_pdf_file(
+                        content=pdf_content,
+                        topic=topic,
+                    )
+
+                    send_telegram_document(
+                        chat_id=chat_id,
+                        file_path=pdf_path,
+                        filename=pdf_filename,
+                        caption=(
+                            f"📄 {topic}\n\n"
+                            "Generated by Hardhik's Personal Assistant"
+                        ),
+                    )
+
+                finally:
+                    if (
+                        pdf_path
+                        and os.path.exists(pdf_path)
+                    ):
+                        try:
+                            os.remove(pdf_path)
+                        except Exception as cleanup_error:
+                            print(
+                                "PDF cleanup failed:",
+                                repr(cleanup_error),
+                            )
+
+                return {
+                    "ok": True,
+                    "type": "generated_pdf",
+                }
+
+            # NORMAL AI CHAT
             reply = ask_text_model(user_message)
 
             send_telegram_message(

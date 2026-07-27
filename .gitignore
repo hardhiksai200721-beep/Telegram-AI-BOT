@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 node_modules/
 process_backup.py
+process_before_pdf.py
